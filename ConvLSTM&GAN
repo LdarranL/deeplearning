@@ -1,0 +1,96 @@
+import pandas as pd
+from datetime import datetime
+
+class SolarVideoDataset(Dataset):
+    def __init__(self, video_info_df, sequence_length=10, prediction_horizon=1):
+        """
+        video_info_df: 날짜 인덱스와 video_path를 포함한 DataFrame
+        """
+        self.video_info = video_info_df
+        self.sequence_length = sequence_length
+        self.prediction_horizon = prediction_horizon
+        
+    def __len__(self):
+        return len(self.video_info)
+    
+    def __getitem__(self, idx):
+        date = self.video_info.index[idx]
+        video_path = self.video_info.iloc[idx]['path']
+        
+        # 누락된 데이터 처리
+        if pd.isna(video_path):
+            # 512x512 그레이스케일 더미 프레임 생성
+            dummy_frame = np.zeros((512, 512), dtype=np.float32)
+            input_sequence = [dummy_frame] * self.sequence_length
+            target_frame = [dummy_frame] * self.prediction_horizon
+        else:
+            frames = self.load_video_frames(video_path)
+            input_sequence = frames[:self.sequence_length]
+            target_frame = frames[self.sequence_length:self.sequence_length + self.prediction_horizon]
+        
+        return torch.FloatTensor(input_sequence), torch.FloatTensor(target_frame)
+    
+    def load_video_frames(self, video_path):
+        # 기존 영상 로딩 로직 유지
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            normalized = gray / 255.0
+            frames.append(normalized)
+        cap.release()
+        return np.array(frames)
+
+def create_time_series_dataset(video_paths):
+    # 날짜 추출 함수
+    def extract_date(path):
+        filename = path.split('/')[-1].split('.')[0]
+        return datetime.strptime(filename, "%Y%m%d")
+
+    # 데이터프레임 생성
+    df = pd.DataFrame({
+        'path': video_paths,
+        'date': [extract_date(p) for p in video_paths]
+    }).set_index('date').sort_index()
+
+    # 전체 날짜 범위 생성
+    full_dates = pd.date_range(start=df.index.min(), end=df.index.max(), freq='D')
+    df_reindexed = df.reindex(full_dates)
+
+    return df_reindexed
+
+def time_series_split(df, ratios=(0.6, 0.2, 0.2)):
+    assert sum(ratios) == 1.0, "Ratios must sum to 1.0"
+    
+    total = len(df)
+    train_end = int(total * ratios[0])
+    val_end = train_end + int(total * ratios[1])
+    
+    return (
+        df.iloc[:train_end],
+        df.iloc[train_end:val_end],
+        df.iloc[val_end:]
+    )
+
+# 사용 예시
+if __name__ == "__main__":
+    # 원본 비디오 경로 리스트
+    raw_video_paths = ["path/to/20230101.mp4", "path/to/20230103.mp4", ...] 
+    
+    # 시계열 데이터셋 생성
+    time_series_df = create_time_series_dataset(raw_video_paths)
+    
+    # 데이터 분할
+    train_df, val_df, test_df = time_series_split(time_series_df)
+    
+    # 데이터셋 생성
+    train_dataset = SolarVideoDataset(train_df)
+    val_dataset = SolarVideoDataset(val_df)
+    test_dataset = SolarVideoDataset(test_df)
+    
+    # 데이터 로더 생성
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
